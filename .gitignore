@@ -1,0 +1,26 @@
+# 可执行文件
+/url-checker
+
+# 依赖模块目录
+vendor/
+
+# Go 测试缓存和编译输出
+*.test
+*.exe
+*.out
+*.prof
+
+# 编辑器/IDE 目录
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 本地配置文件（不应提交的密钥或环境配置）
+config.yaml
+.env
+*.local
