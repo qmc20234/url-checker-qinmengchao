@@ -38,11 +38,12 @@ func (s *SSLChecker) Check(ctx context.Context, urlStr string) (*CertInfo, error
 
 	// 如果没有指定端口，根据协议使用默认端口
 	if port == "" {
-		if u.Scheme == "https" {
+		switch u.Scheme {
+		case "https":
 			port = "443"
-		} else if u.Scheme == "http" {
+		case "http":
 			port = "80"
-		} else {
+		default:
 			return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
 		}
 	}

@@ -218,6 +218,11 @@ func (c *Checker) CheckURL(ctx context.Context, url string) models.CheckResult {
 	return result
 }
 
+type indexedResult struct {
+	index  int
+	result models.CheckResult
+}
+
 // BatchCheck 批量检查URL
 func (c *Checker) BatchCheck(ctx context.Context, urls []string) []models.CheckResult {
 	c.logger.Info().
@@ -232,26 +237,30 @@ func (c *Checker) BatchCheck(ctx context.Context, urls []string) []models.CheckR
 	// 准备结果存储
 	results := make([]models.CheckResult, len(urls))
 
+	// 准备结果存储
+	resultCh := make(chan indexedResult, len(urls))
 	// 创建带超时的上下文
 	ctx, cancel := context.WithTimeout(ctx, c.timeoutForBatch(len(urls)))
 	defer cancel()
-
-	// 使用互斥锁保护结果写入
-	var mu sync.Mutex
 
 	for i, url := range urls {
 		i, url := i, url // 闭包捕获
 
 		p.Go(func() {
-			result := c.CheckURL(ctx, url)
-
-			mu.Lock()
-			results[i] = result
-			mu.Unlock()
+			resultCh <- indexedResult{
+				index:  i,
+				result: c.CheckURL(ctx, url),
+			}
 		})
 	}
 
 	p.Wait()
+	close(resultCh)
+
+	// 从通道中读取结果
+	for res := range resultCh {
+		results[res.index] = res.result
+	}
 
 	// 记录批量检查完成
 	batchDuration := time.Since(batchStart)
