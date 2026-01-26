@@ -12,7 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/pkgerrors"
-	"golang.org/x/time/rate"
 
 	"url-checker/internal/api"
 	"url-checker/internal/checker"
@@ -170,11 +169,6 @@ func (app *Application) initRouter() error {
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// 可选：速率限制
-	if app.config.Server.Env == "production" {
-		app.router.Use(app.rateLimitMiddleware())
-	}
-
 	// 注册路由
 	app.registerRoutes()
 
@@ -201,21 +195,12 @@ func (app *Application) initServer() error {
 
 // registerRoutes 注册路由
 func (app *Application) registerRoutes() {
-	// 健康检查
-	app.router.GET("/health", app.healthCheck)
-
 	// API路由
 	apiGroup := app.router.Group("/api")
 	{
-		// 原有的检查接口
+		// 检查接口
 		apiGroup.GET("/check", app.handler.CheckStream)
-
 	}
-
-	// 根路径重定向
-	app.router.GET("/", func(c *gin.Context) {
-		c.Redirect(http.StatusMovedPermanently, "/health")
-	})
 }
 
 // loggingMiddleware 日志中间件
@@ -248,50 +233,6 @@ func (app *Application) loggingMiddleware() gin.HandlerFunc {
 	}
 }
 
-// rateLimitMiddleware 速率限制中间件
-func (app *Application) rateLimitMiddleware() gin.HandlerFunc {
-	// 每个IP每秒10个请求，突发20个
-	limiter := rate.NewLimiter(rate.Limit(10), 20)
-
-	return func(c *gin.Context) {
-		if !limiter.Allow() {
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error": "请求过于频繁，请稍后再试",
-			})
-			c.Abort()
-			return
-		}
-		c.Next()
-	}
-}
-
-// healthCheck 健康检查
-func (app *Application) healthCheck(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"status":    "healthy",
-		"service":   "url-checker",
-		"timestamp": time.Now().Format(time.RFC3339),
-		"uptime":    time.Since(app.startTime).String(),
-	})
-}
-
-// status 状态检查
-func (app *Application) status(c *gin.Context) {
-	stats := gin.H{
-		"status":     "running",
-		"version":    "1.0.0",
-		"start_time": app.startTime.Format(time.RFC3339),
-		"uptime":     time.Since(app.startTime).String(),
-		"config": gin.H{
-			"max_concurrent": app.config.Checker.MaxConcurrent,
-			"timeout":        app.config.Checker.Timeout.String(),
-			"ssl_check":      app.config.SSL.CheckEnabled,
-		},
-	}
-
-	c.JSON(http.StatusOK, stats)
-}
-
 // Run 启动应用
 func (app *Application) Run() error {
 	app.logger.Info().
@@ -314,18 +255,18 @@ func (app *Application) Run() error {
 func (app *Application) Shutdown(ctx context.Context) error {
 	app.logger.Info().Msg("正在关闭应用...")
 
-	// 关闭HTTP服务器
-	if err := app.server.Shutdown(ctx); err != nil {
-		app.logger.Error().Err(err).Msg("HTTP服务器关闭失败")
-		return err
-	}
-
 	// 关闭checker
 	if app.checker != nil {
 		if err := app.checker.Shutdown(); err != nil {
 			app.logger.Error().Err(err).Msg("检查器关闭失败")
 			return err
 		}
+	}
+
+	// 关闭HTTP服务器
+	if err := app.server.Shutdown(ctx); err != nil {
+		app.logger.Error().Err(err).Msg("HTTP服务器关闭失败")
+		return err
 	}
 
 	app.logger.Info().Msg("应用已关闭")
