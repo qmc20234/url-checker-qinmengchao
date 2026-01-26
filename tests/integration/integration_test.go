@@ -5,9 +5,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
@@ -50,9 +52,18 @@ func (s *IntegrationTestSuite) SetupSuite() {
 	// 2. 创建测试目标服务器
 	s.setupTestTargetServers()
 
+	// 2. 早期初始化结构化日志（控制台格式）
+	logger := zerolog.New(zerolog.ConsoleWriter{
+		Out:        os.Stderr,
+		TimeFormat: time.RFC3339,
+	}).With().
+		Timestamp().
+		Caller().
+		Logger()
+
 	// 3. 初始化应用
 	var err error
-	s.app, err = app.NewApplication(cfg)
+	s.app, err = app.NewApplication(cfg, logger)
 	require.NoError(s.T(), err)
 
 	// 4. 启动测试服务器

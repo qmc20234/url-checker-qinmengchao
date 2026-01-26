@@ -65,24 +65,32 @@ func main() {
 		Str("port", cfg.Server.Port).
 		Msg("Application starting")
 
-	// 7. 构建依赖容器
-	container, err := di.BuildContainer(cfg, logger)
+	// // 7. 构建依赖容器
+	// container, err := di.BuildContainer(cfg, logger)
+	// if err != nil {
+	// 	logger.Fatal().
+	// 		Err(err).
+	// 		Str("phase", "di_container").
+	// 		Msg("Failed to build dependency container")
+	// }
+
+	// // 8. 从容器获取应用
+	// var application *app.Application
+	// if err := container.Invoke(func(app *app.Application) {
+	// 	application = app
+	// }); err != nil {
+	// 	logger.Fatal().
+	// 		Err(err).
+	// 		Str("phase", "di_invoke").
+	// 		Msg("Failed to resolve application dependencies")
+	// }
+	// 7. 直接初始化应用实例（替换掉原来的第7、8步）
+	application, err := app.NewApplication(cfg, logger)
 	if err != nil {
 		logger.Fatal().
 			Err(err).
-			Str("phase", "di_container").
-			Msg("Failed to build dependency container")
-	}
-
-	// 8. 从容器获取应用
-	var application *app.Application
-	if err := container.Invoke(func(app *app.Application) {
-		application = app
-	}); err != nil {
-		logger.Fatal().
-			Err(err).
-			Str("phase", "di_invoke").
-			Msg("Failed to resolve application dependencies")
+			Str("phase", "app_init").
+			Msg("Failed to create application")
 	}
 
 	// 9. 使用errgroup管理goroutine
