@@ -46,14 +46,17 @@ func NewApplication(cfg *config.Config) (*Application, error) {
 		return nil, fmt.Errorf("初始化检查器失败: %w", err)
 	}
 
-	app.initHandler()
+	if err := app.initHandler(); err != nil {
+		return nil, fmt.Errorf("初始化API处理器: %w", err)
+	}
 
 	if err := app.initRouter(); err != nil {
 		return nil, fmt.Errorf("初始化路由失败: %w", err)
 	}
 
-	app.initServer()
-
+	if err := app.initServer(); err != nil {
+		return nil, fmt.Errorf("初始化路由失败: %w", err)
+	}
 	app.logger.Info().
 		Str("version", "1.0.0").
 		Msg("应用初始化完成")
@@ -118,7 +121,6 @@ func (app *Application) initChecker() error {
 		AllowInsecure:  app.config.Checker.AllowInsecure,
 		FollowRedirect: app.config.Checker.FollowRedirect,
 		SSLCheck:       app.config.SSL.CheckEnabled,
-		SSLWarnDays:    app.config.SSL.WarnDaysBefore,
 	}
 
 	var err error
@@ -136,9 +138,10 @@ func (app *Application) initChecker() error {
 }
 
 // initHandler 初始化API处理器
-func (app *Application) initHandler() {
+func (app *Application) initHandler() error {
 	app.handler = api.NewHandler(app.checker, app.logger)
 	app.logger.Debug().Msg("API处理器初始化完成")
+	return nil
 }
 
 // initRouter 初始化路由
@@ -180,7 +183,7 @@ func (app *Application) initRouter() error {
 }
 
 // initServer 初始化HTTP服务器
-func (app *Application) initServer() {
+func (app *Application) initServer() error {
 	app.server = &http.Server{
 		Addr:         ":" + app.config.Server.Port,
 		Handler:      app.router,
@@ -192,6 +195,8 @@ func (app *Application) initServer() {
 	app.logger.Debug().
 		Str("addr", app.server.Addr).
 		Msg("HTTP服务器初始化完成")
+
+	return nil
 }
 
 // registerRoutes 注册路由
@@ -205,11 +210,6 @@ func (app *Application) registerRoutes() {
 		// 原有的检查接口
 		apiGroup.GET("/check", app.handler.CheckStream)
 
-		// 批量检查接口（POST方式）
-		apiGroup.POST("/check", app.handler.CheckStream)
-
-		// 状态接口
-		apiGroup.GET("/status", app.status)
 	}
 
 	// 根路径重定向

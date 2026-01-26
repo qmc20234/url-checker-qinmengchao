@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -70,8 +69,11 @@ func (s *IntegrationTestSuite) TestMultipleURLsCheck() {
 	}
 
 	// 构建请求
-	encodedURLs := url.QueryEscape(strings.Join(urls, ","))
-	reqURL := fmt.Sprintf("%s/api/check?urls=%s", s.server.URL, encodedURLs)
+	params := url.Values{}
+	for _, u := range urls {
+		params.Add("urls", u)
+	}
+	reqURL := fmt.Sprintf("%s/api/check?%s", s.server.URL, params.Encode())
 
 	// 发送请求
 	resp, err := s.httpClient.Get(reqURL)
@@ -112,8 +114,11 @@ func (s *IntegrationTestSuite) TestConcurrencyControl() {
 	}
 
 	// 构建请求
-	encodedURLs := url.QueryEscape(strings.Join(urls, ","))
-	reqURL := fmt.Sprintf("%s/api/check?urls=%s", s.server.URL, encodedURLs)
+	params := url.Values{}
+	for _, u := range urls {
+		params.Add("urls", u)
+	}
+	reqURL := fmt.Sprintf("%s/api/check?%s", s.server.URL, params.Encode())
 
 	// 记录开始时间
 	start := time.Now()
@@ -158,9 +163,12 @@ func (s *IntegrationTestSuite) TestErrorURLHandling() {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// 构建请求
-			encodedURLs := url.QueryEscape(strings.Join(tc.urls, ","))
-			reqURL := fmt.Sprintf("%s/api/check?urls=%s", s.server.URL, encodedURLs)
+			// 构建请求 - 使用标准的多参数格式
+			params := url.Values{}
+			for _, u := range tc.urls {
+				params.Add("urls", u)
+			}
+			reqURL := fmt.Sprintf("%s/api/check?%s", s.server.URL, params.Encode())
 
 			// 发送请求
 			resp, err := s.httpClient.Get(reqURL)
@@ -242,13 +250,23 @@ func (s *IntegrationTestSuite) TestInvalidParameters() {
 		},
 		{
 			name:       "超过URL数量限制",
-			query:      fmt.Sprintf("urls=%s", strings.Repeat("http://example.com,", 101)),
+			query:      "",
 			expectCode: http.StatusBadRequest,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			// 特殊处理：超过URL数量限制的情况需要动态生成101个URL
+			if tc.name == "超过URL数量限制" {
+				// 生成101个URL参数
+				params := url.Values{}
+				for i := 0; i < 101; i++ {
+					params.Add("urls", "http://example.com")
+				}
+				tc.query = params.Encode()
+			}
+
 			reqURL := fmt.Sprintf("%s/api/check?%s", s.server.URL, tc.query)
 
 			resp, err := s.httpClient.Get(reqURL)

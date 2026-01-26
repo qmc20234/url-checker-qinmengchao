@@ -27,7 +27,6 @@ type Config struct {
 	AllowInsecure  bool
 	FollowRedirect bool
 	SSLCheck       bool
-	SSLWarnDays    int
 }
 
 // Checker URL检查器
@@ -208,15 +207,6 @@ func (c *Checker) CheckURL(ctx context.Context, url string) models.CheckResult {
 		if err == nil {
 			result.CertExpiry = &certInfo.Expiry
 			result.DaysLeft = certInfo.DaysLeft
-
-			// 检查证书是否即将过期
-			if certInfo.DaysLeft <= c.config.SSLWarnDays {
-				c.logger.Warn().
-					Str("url", url).
-					Int("days_left", certInfo.DaysLeft).
-					Time("expiry", certInfo.Expiry).
-					Msg("SSL证书即将过期")
-			}
 		} else {
 			c.logger.Warn().
 				Str("url", url).

@@ -19,10 +19,9 @@ type ServerConfig struct {
 	Port         string        `mapstructure:"port"`
 	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
 	WriteTimeout time.Duration `mapstructure:"write_timeout"`
-	// 添加新字段以支持更多功能
-	IdleTimeout time.Duration `mapstructure:"idle_timeout"`
-	Env         string        `mapstructure:"env"`
-	MaxBodySize int64         `mapstructure:"max_body_size"`
+	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`
+	Env          string        `mapstructure:"env"`
+	MaxBodySize  int64         `mapstructure:"max_body_size"`
 }
 
 type LogConfig struct {
@@ -32,10 +31,9 @@ type LogConfig struct {
 }
 
 type CheckerConfig struct {
-	MaxConcurrent int           `mapstructure:"max_concurrent"`
-	Timeout       time.Duration `mapstructure:"timeout"`
-	MaxRetries    int           `mapstructure:"max_retries"`
-	// 添加新字段以支持更多功能
+	MaxConcurrent  int           `mapstructure:"max_concurrent"`
+	Timeout        time.Duration `mapstructure:"timeout"`
+	MaxRetries     int           `mapstructure:"max_retries"`
 	RetryInterval  time.Duration `mapstructure:"retry_interval"`
 	MaxRedirects   int           `mapstructure:"max_redirects"`
 	UserAgent      string        `mapstructure:"user_agent"`
@@ -45,8 +43,6 @@ type CheckerConfig struct {
 
 type SSLConfig struct {
 	CheckEnabled bool `mapstructure:"check_enabled"`
-	// 添加新字段
-	WarnDaysBefore int `mapstructure:"warn_days_before"`
 }
 
 func Load() (*Config, error) {
@@ -102,5 +98,4 @@ func setDefaults() {
 
 	// SSL 默认值
 	viper.SetDefault("ssl.check_enabled", true)
-	viper.SetDefault("ssl.warn_days_before", 30)
 }
