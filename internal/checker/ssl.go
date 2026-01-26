@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"net"
+	"net/url"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 // SSLChecker SSL证书检查器
 type SSLChecker struct {
 	Timeout time.Duration
+	Logger  zerolog.Logger
 }
 
 // CertInfo 证书信息
@@ -22,14 +25,34 @@ type CertInfo struct {
 }
 
 // Check 检查SSL证书
-func (s *SSLChecker) Check(ctx context.Context, host string) (*CertInfo, error) {
-	// 解析主机和端口
-	host, port, err := net.SplitHostPort(host)
+func (s *SSLChecker) Check(ctx context.Context, urlStr string) (*CertInfo, error) {
+	// 解析URL，提取主机和端口
+	u, err := url.Parse(urlStr)
 	if err != nil {
-		// 默认HTTPS端口
-		host = host
-		port = "443"
+		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
+
+	// 获取主机名和端口
+	host := u.Hostname()
+	port := u.Port()
+
+	// 如果没有指定端口，根据协议使用默认端口
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else if u.Scheme == "http" {
+			port = "80"
+		} else {
+			return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
+		}
+	}
+
+	// 验证主机名
+	if host == "" {
+		return nil, fmt.Errorf("URL has no hostname")
+	}
+
+	fmt.Printf("[SSLChecker] 检查SSL: 主机=%s, 端口=%s\n", host, port)
 
 	// 创建带超时的上下文
 	ctx, cancel := context.WithTimeout(ctx, s.Timeout)
@@ -42,9 +65,12 @@ func (s *SSLChecker) Check(ctx context.Context, host string) (*CertInfo, error) 
 		},
 	}
 
-	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%s", host, port))
+	address := fmt.Sprintf("%s:%s", host, port)
+	fmt.Printf("[SSLChecker] 连接地址: %s\n", address)
+
+	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
+		return nil, fmt.Errorf("failed to connect to %s:%s: %w", host, port, err)
 	}
 	defer conn.Close()
 
