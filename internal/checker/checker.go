@@ -50,7 +50,7 @@ type Metrics struct {
 	AvgLatency   time.Duration
 }
 
-// NewChecker 创建检查器（支持依赖注入）
+// NewChecker 创建检查器
 func NewChecker(config Config, logger zerolog.Logger) (*Checker, error) {
 	if config.MaxConcurrent <= 0 {
 		return nil, fmt.Errorf("max_concurrent must be greater than 0")

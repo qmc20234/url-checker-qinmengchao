@@ -28,7 +28,7 @@ func NewHandler(checker *checker.Checker, logger zerolog.Logger) *Handler {
 
 // CheckRequest 检查请求参数
 type CheckRequest struct {
-	URLs []string `form:"urls" binding:"required,min=1,max=100,dive,required,url"`
+	URLs []string `form:"urls" binding:"required,min=1,dive,required,url"`
 }
 
 // CheckStream 流式检查URL
@@ -47,8 +47,6 @@ func (h *Handler) CheckStream(c *gin.Context) {
 					errorMessages = append(errorMessages, "缺少urls参数")
 				case "min":
 					errorMessages = append(errorMessages, "URL列表不能为空")
-				case "max":
-					errorMessages = append(errorMessages, "最多支持100个URL")
 				case "url":
 					errorMessages = append(errorMessages, fmt.Sprintf("无效的URL格式: %s", fieldErr.Value()))
 				case "dive":
