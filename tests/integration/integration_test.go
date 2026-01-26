@@ -42,6 +42,8 @@ func (s *IntegrationTestSuite) SetupSuite() {
 			RetryInterval: 1 * time.Second,
 			MaxRedirects:  5,
 			UserAgent:     "URL-Checker-Integration-Test",
+			AllowInsecure: true, // <- 添加：在测试中跳过证书校验
+
 		},
 	}
 

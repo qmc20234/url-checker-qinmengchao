@@ -80,6 +80,30 @@ func (h *Handler) CheckStream(c *gin.Context) {
 		return
 	}
 
+	// 将可能的逗号分隔项展开为独立的 URL 列表
+	expanded := make([]string, 0, len(req.URLs))
+	for _, s := range req.URLs {
+		for _, part := range strings.Split(s, ",") {
+			p := strings.TrimSpace(part)
+			if p == "" {
+				continue
+			}
+			expanded = append(expanded, p)
+		}
+	}
+
+	req.URLs = expanded
+
+	// 可选：再次检查数量限制
+	if len(req.URLs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "URL列表不能为空"})
+		return
+	}
+	if len(req.URLs) > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "最多支持100个URL"})
+		return
+	}
+
 	// 手动验证URL格式（Gin的url验证可能不够严格）
 	for _, urlStr := range req.URLs {
 		if !isValidURL(urlStr) {

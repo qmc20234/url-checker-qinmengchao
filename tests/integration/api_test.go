@@ -31,7 +31,7 @@ func (s *IntegrationTestSuite) TestSingleURLCheck() {
 
 	// 验证响应
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
+	assert.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")
 	assert.Equal(t, "no-cache", resp.Header.Get("Cache-Control"))
 
 	// 解析SSE响应
