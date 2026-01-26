@@ -16,12 +16,13 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port         string        `mapstructure:"port"`
-	ReadTimeout  time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout time.Duration `mapstructure:"write_timeout"`
-	IdleTimeout  time.Duration `mapstructure:"idle_timeout"`
-	Env          string        `mapstructure:"env"`
-	MaxBodySize  int64         `mapstructure:"max_body_size"`
+	Port            string        `mapstructure:"port"`
+	ReadTimeout     time.Duration `mapstructure:"read_timeout"`
+	WriteTimeout    time.Duration `mapstructure:"write_timeout"`
+	IdleTimeout     time.Duration `mapstructure:"idle_timeout"`
+	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
+	Env             string        `mapstructure:"env"`
+	MaxBodySize     int64         `mapstructure:"max_body_size"`
 }
 
 type LogConfig struct {
@@ -78,6 +79,7 @@ func setDefaults() {
 	viper.SetDefault("server.read_timeout", "30s")
 	viper.SetDefault("server.write_timeout", "30s")
 	viper.SetDefault("server.idle_timeout", "60s")
+	viper.SetDefault("server.shutdown_timeout", "30s")
 	viper.SetDefault("server.env", "development")
 	viper.SetDefault("server.max_body_size", 1048576) // 1MB
 
