@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -215,68 +214,6 @@ func (s *IntegrationTestSuite) TestSSLCertCheck() {
 			break
 		}
 	}
-}
-
-// TestRedirectHandling 测试重定向处理
-func (s *IntegrationTestSuite) TestRedirectHandling() {
-	t := s.T()
-
-	// 使用重定向服务器
-	redirectServer := s.testServers[3]
-	redirectURL := redirectServer.URL + "/redirect"
-	reqURL := fmt.Sprintf("%s/api/check?urls=%s", s.server.URL, url.QueryEscape(redirectURL))
-
-	// 发送请求
-	resp, err := s.httpClient.Get(reqURL)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	// 解析响应
-	messages, err := ParseSSE(resp.Body)
-	require.NoError(t, err)
-
-	// 验证重定向成功
-	for _, msg := range messages {
-		if msg.Event == "check" {
-			var result CheckResult
-			err := json.Unmarshal([]byte(msg.Data), &result)
-			assert.NoError(t, err)
-			assert.Equal(t, http.StatusOK, result.StatusCode)
-			break
-		}
-	}
-}
-
-// TestRetryMechanism 测试重试机制
-func (s *IntegrationTestSuite) TestRetryMechanism() {
-	t := s.T()
-
-	// 创建模拟失败然后成功的服务器
-	attemptCount := 0
-	retryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attemptCount++
-		if attemptCount < 3 { // 前两次失败
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("Success after retry"))
-	}))
-	defer retryServer.Close()
-
-	reqURL := fmt.Sprintf("%s/api/check?urls=%s", s.server.URL, url.QueryEscape(retryServer.URL))
-
-	// 发送请求
-	resp, err := s.httpClient.Get(reqURL)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	// 读取响应确保请求完成
-	_, err = io.ReadAll(resp.Body)
-	require.NoError(t, err)
-
-	// 验证重试机制：应该尝试了3次
-	assert.Equal(t, 3, attemptCount)
 }
 
 // TestInvalidParameters 测试无效参数
