@@ -28,26 +28,8 @@ type IntegrationTestSuite struct {
 
 // SetupSuite 测试套件初始化
 func (s *IntegrationTestSuite) SetupSuite() {
-	// 1. 创建测试配置
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
-		},
-		Log: config.LogConfig{
-			Level:  "info",
-			Format: "json",
-		},
-		Checker: config.CheckerConfig{
-			MaxConcurrent: 5,
-			Timeout:       10 * time.Second,
-			RetryInterval: 1 * time.Second,
-			MaxRedirects:  5,
-			UserAgent:     "URL-Checker-Integration-Test",
-			AllowInsecure: true, // <- 添加：在测试中跳过证书校验
 
-		},
-	}
+	cfg, _ := config.Load()
 
 	// 2. 创建测试目标服务器
 	s.setupTestTargetServers()

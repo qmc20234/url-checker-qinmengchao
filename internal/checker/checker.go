@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
+	"url-checker/internal/config"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
@@ -17,14 +19,13 @@ import (
 
 // --- 优化1: 职责分离的配置结构 ---
 type HTTPConfig struct {
-	Timeout        time.Duration
-	MaxRetries     int
-	RetryInterval  time.Duration
-	MaxRedirects   int
-	UserAgent      string
-	AllowInsecure  bool
-	FollowRedirect bool
-	// 连接池配置
+	Timeout             time.Duration
+	MaxRetries          int
+	RetryInterval       time.Duration
+	MaxRedirects        int
+	UserAgent           string
+	AllowInsecure       bool
+	FollowRedirect      bool
 	TLSHandshakeTimeout time.Duration
 	MaxIdleConnsPerHost int
 	IdleConnTimeout     time.Duration
@@ -33,6 +34,12 @@ type HTTPConfig struct {
 type PoolConfig struct {
 	MaxConcurrent int
 	BatchTimeout  time.Duration // 整个批次的超时
+}
+
+type SSLConfig struct {
+	Enabled            bool
+	InsecureSkipVerify bool
+	Timeout            time.Duration
 }
 
 // CheckerConfig 顶层配置（组合各子配置）
@@ -50,39 +57,10 @@ func (c *CheckerConfig) Validate() error {
 	if c.HTTP.Timeout <= 0 {
 		return fmt.Errorf("HTTP.Timeout must be > 0")
 	}
-	// if c.SSL.Enabled && c.SSL.Timeout <= 0 {
-	// 	return fmt.Errorf("SSL.Timeout must be > 0 when SSL enabled")
-	// }
-	return nil
-}
-
-// DefaultCheckerConfig 默认配置
-func DefaultCheckerConfig() CheckerConfig {
-	return CheckerConfig{
-		HTTP: HTTPConfig{
-			Timeout:             10 * time.Second,
-			MaxRetries:          3,
-			RetryInterval:       100 * time.Millisecond,
-			MaxRedirects:        5,
-			UserAgent:           "URL-Checker/1.0",
-			AllowInsecure:       false,
-			FollowRedirect:      true,
-			TLSHandshakeTimeout: 5 * time.Second,
-			MaxIdleConnsPerHost: 100,
-			IdleConnTimeout:     90 * time.Second,
-		},
-		Pool: PoolConfig{
-			MaxConcurrent: 50,
-			BatchTimeout:  5 * time.Minute,
-		},
-		SSL: SSLConfig{
-			// Enabled:                true,
-			Timeout:                5 * time.Second,
-			InsecureSkipVerify:     true, // 仅检查，不验证
-			VerifyCertificateChain: false,
-			MinTLSVersion:          tls.VersionTLS12,
-		},
+	if c.SSL.Enabled && c.SSL.Timeout <= 0 {
+		return fmt.Errorf("SSL.Timeout must be > 0 when SSL enabled")
 	}
+	return nil
 }
 
 // --- 优化2: HTTP客户端工厂（提高可测试性） ---
@@ -92,6 +70,13 @@ type HTTPClientFactory struct {
 
 func NewHTTPClientFactory(config HTTPConfig) *HTTPClientFactory {
 	return &HTTPClientFactory{config: config}
+}
+
+// 延迟在 [0, base_delay * 2^attempt) 之间随机
+func fullJitter(baseDelay time.Duration, attempt int) time.Duration {
+	maxDelay := baseDelay * (1 << uint(attempt))
+	// 生成0到maxDelay之间的随机延迟
+	return time.Duration(rand.Int63n(int64(maxDelay)))
 }
 
 func (f *HTTPClientFactory) Create() *resty.Client {
@@ -126,13 +111,24 @@ func (f *HTTPClientFactory) Create() *resty.Client {
 	// 指数退避重试
 	client.SetRetryAfter(func(c *resty.Client, r *resty.Response) (time.Duration, error) {
 		attempt := r.Request.Attempt
-		delay := time.Duration(100*(1<<uint(attempt))) * time.Millisecond
-		if delay > 10*time.Second {
-			delay = 10 * time.Second
+
+		// 使用 fullJitter 计算延迟
+		delay := fullJitter(
+			100*time.Millisecond, // 基础延迟
+			attempt,              // 当前尝试次数
+		)
+
+		// 记录重试信息（如果有日志上下文）
+		if ctx := r.Request.Context(); ctx != nil {
+			if logger, ok := ctx.Value("logger").(zerolog.Logger); ok {
+				logger.Debug().
+					Int("attempt", attempt).
+					Dur("delay", delay).
+					Str("url", r.Request.URL).
+					Msg("重试延迟计算")
+			}
 		}
-		// 添加抖动
-		jitter := time.Duration(float64(delay) * 0.1)
-		delay = delay - jitter + time.Duration(float64(jitter)*2)
+
 		return delay, nil
 	})
 
@@ -145,9 +141,7 @@ type Checker struct {
 	sslChecker *SSLChecker
 	config     CheckerConfig
 	logger     zerolog.Logger
-	metrics    *EnhancedMetrics
 	mu         sync.RWMutex
-	activeJobs int
 }
 
 // 增强的CheckResult（支持追踪）
@@ -166,64 +160,63 @@ type CheckResult struct {
 	RetryCount int           `json:"retry_count,omitempty"`
 }
 
-// 增强的指标收集
-type EnhancedMetrics struct {
-	TotalChecks      int64            `json:"total_checks"`
-	FailedChecks     int64            `json:"failed_checks"`
-	ActiveJobs       int              `json:"active_jobs"`
-	StatusCodes      map[int]int64    `json:"status_codes"`      // 状态码分布
-	HostChecks       map[string]int64 `json:"host_checks"`       // 按主机统计
-	ErrorTypes       map[string]int64 `json:"error_types"`       // 错误类型统计
-	LatencyHistogram []time.Duration  `json:"latency_histogram"` // 延迟直方图（简化版）
-}
-
-func NewEnhancedMetrics() *EnhancedMetrics {
-	return &EnhancedMetrics{
-		StatusCodes: make(map[int]int64),
-		HostChecks:  make(map[string]int64),
-		ErrorTypes:  make(map[string]int64),
-	}
-}
-
 // --- 优化4: 重构的检查器构造函数 ---
-func NewChecker(config CheckerConfig, logger zerolog.Logger) (*Checker, error) {
+func NewChecker(checkerConfig config.CheckerConfig, sslConfig config.SSLConfig, logger zerolog.Logger) (*Checker, error) {
+	// 创建内部配置结构
+	internalConfig := CheckerConfig{
+		HTTP: HTTPConfig{
+			Timeout:             checkerConfig.Timeout,
+			MaxRetries:          checkerConfig.MaxRetries,
+			RetryInterval:       checkerConfig.RetryInterval,
+			MaxRedirects:        checkerConfig.MaxRedirects,
+			UserAgent:           checkerConfig.UserAgent,
+			AllowInsecure:       checkerConfig.AllowInsecure,
+			FollowRedirect:      checkerConfig.FollowRedirect,
+			TLSHandshakeTimeout: checkerConfig.TLSHandshakeTimeout,
+			MaxIdleConnsPerHost: checkerConfig.MaxIdleConnsPerHost,
+			IdleConnTimeout:     checkerConfig.IdleConnTimeout,
+		},
+		Pool: PoolConfig{
+			MaxConcurrent: checkerConfig.MaxConcurrent,
+			BatchTimeout:  checkerConfig.BatchTimeout,
+		},
+		SSL: SSLConfig{
+			Enabled:            sslConfig.Enabled,
+			InsecureSkipVerify: sslConfig.InsecureSkipVerify,
+			Timeout:            sslConfig.Timeout,
+		},
+	}
+
 	// 配置验证
-	if err := config.Validate(); err != nil {
+	if err := internalConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid checker config: %w", err)
 	}
 
 	// 创建HTTP客户端
-	clientFactory := NewHTTPClientFactory(config.HTTP)
+	clientFactory := NewHTTPClientFactory(internalConfig.HTTP)
 	client := clientFactory.Create()
 
 	// 创建SSL检查器（如果启用）
 	var sslChecker *SSLChecker
-	// if config.SSL.Enabled {
-	sslConfig := SSLConfig{
-		Timeout:                config.SSL.Timeout,
-		InsecureSkipVerify:     config.SSL.InsecureSkipVerify,
-		VerifyCertificateChain: config.SSL.VerifyCertificateChain,
-		MinTLSVersion:          config.SSL.MinTLSVersion,
+	if internalConfig.SSL.Enabled {
+		var err error
+		sslChecker, err = NewSSLChecker(internalConfig.SSL, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SSL checker: %w", err)
+		}
 	}
-	var err error
-	sslChecker, err = NewSSLChecker(sslConfig, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create SSL checker: %w", err)
-	}
-	// }
 
 	c := &Checker{
 		client:     client,
 		sslChecker: sslChecker,
-		config:     config,
+		config:     internalConfig,
 		logger:     logger.With().Str("component", "checker").Logger(),
-		metrics:    NewEnhancedMetrics(),
 	}
 
 	c.logger.Info().
-		Int("max_concurrent", config.Pool.MaxConcurrent).
-		Dur("http_timeout", config.HTTP.Timeout).
-		// Bool("ssl_enabled", config.SSL.Enabled).
+		Int("max_concurrent", internalConfig.Pool.MaxConcurrent).
+		Dur("http_timeout", internalConfig.HTTP.Timeout).
+		Bool("ssl_enabled", internalConfig.SSL.Enabled).
 		Msg("URL检查器初始化完成")
 
 	return c, nil
@@ -234,21 +227,6 @@ func (c *Checker) CheckURL(ctx context.Context, urlStr string, batchID, checkID 
 	// 开始检查
 	start := time.Now()
 	host := extractHost(urlStr)
-
-	// 更新指标
-	c.mu.Lock()
-	c.activeJobs++
-	c.metrics.ActiveJobs = c.activeJobs
-	c.metrics.TotalChecks++
-	c.metrics.HostChecks[host]++
-	c.mu.Unlock()
-
-	defer func() {
-		c.mu.Lock()
-		c.activeJobs--
-		c.metrics.ActiveJobs = c.activeJobs
-		c.mu.Unlock()
-	}()
 
 	// 创建本次检查的专用Logger
 	checkLogger := c.logger.With().
@@ -277,19 +255,10 @@ func (c *Checker) CheckURL(ctx context.Context, urlStr string, batchID, checkID 
 
 	result.Latency = time.Since(start)
 
-	// 记录延迟到直方图（简化版，记录最近100次）
-	c.mu.Lock()
-	if len(c.metrics.LatencyHistogram) < 100 {
-		c.metrics.LatencyHistogram = append(c.metrics.LatencyHistogram, result.Latency)
-	}
-	c.mu.Unlock()
-
 	if err != nil {
 		// 失败处理
 		c.mu.Lock()
-		c.metrics.FailedChecks++
 		errorType := extractErrorType(err)
-		c.metrics.ErrorTypes[errorType]++
 		c.mu.Unlock()
 
 		result.Error = err.Error()
@@ -309,11 +278,6 @@ func (c *Checker) CheckURL(ctx context.Context, urlStr string, batchID, checkID 
 	result.StatusCode = resp.StatusCode()
 	result.Success = resp.IsSuccess()
 	result.RetryCount = resp.Request.Attempt
-
-	// 记录状态码分布
-	c.mu.Lock()
-	c.metrics.StatusCodes[result.StatusCode]++
-	c.mu.Unlock()
 
 	checkLogger.Debug().
 		Int("status_code", result.StatusCode).
@@ -458,27 +422,25 @@ func generateCheckID() string {
 	return "check_" + uuid.New().String()[:8]
 }
 
+// IsSSLRequired 判断URL是否需要SSL检查
+func IsSSLRequired(urlStr string) (bool, error) {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return false, fmt.Errorf("解析URL失败: %w", err)
+	}
+	return u.Scheme == "https", nil
+}
+
 // --- 其他方法（Shutdown, GetMetrics等保持类似结构，但使用增强的Metrics） ---
 func (c *Checker) Shutdown() error {
 	c.logger.Info().
-		Int64("total_checks", c.metrics.TotalChecks).
-		Int64("failed_checks", c.metrics.FailedChecks).
-		Int("active_jobs", c.activeJobs).
 		Msg("检查器正在关闭")
 
 	// 清理资源
 	if c.sslChecker != nil {
-		// 如果有需要清理的SSL检查器资源
+		// SSL检查器可能没有需要特殊清理的资源，但如果有，可以在这里调用
 	}
 
 	c.logger.Info().Msg("检查器已关闭")
 	return nil
-}
-
-func (c *Checker) GetMetrics() EnhancedMetrics {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// 返回副本
-	return *c.metrics
 }
