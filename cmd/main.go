@@ -39,14 +39,6 @@ func main() {
 			Msg("Failed to load configuration")
 	}
 
-	// 4. 根据配置重新配置日志
-	if cfg.Log.Format == "json" {
-		logger = zerolog.New(os.Stdout).
-			With().
-			Timestamp().
-			Caller().
-			Logger()
-	}
 	level, _ := zerolog.ParseLevel(cfg.Log.Level)
 	zerolog.SetGlobalLevel(level)
 
@@ -65,25 +57,6 @@ func main() {
 		Str("port", cfg.Server.Port).
 		Msg("Application starting")
 
-	// // 7. 构建依赖容器
-	// container, err := di.BuildContainer(cfg, logger)
-	// if err != nil {
-	// 	logger.Fatal().
-	// 		Err(err).
-	// 		Str("phase", "di_container").
-	// 		Msg("Failed to build dependency container")
-	// }
-
-	// // 8. 从容器获取应用
-	// var application *app.Application
-	// if err := container.Invoke(func(app *app.Application) {
-	// 	application = app
-	// }); err != nil {
-	// 	logger.Fatal().
-	// 		Err(err).
-	// 		Str("phase", "di_invoke").
-	// 		Msg("Failed to resolve application dependencies")
-	// }
 	// 7. 直接初始化应用实例（替换掉原来的第7、8步）
 	application, err := app.NewApplication(cfg, logger)
 	if err != nil {
