@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"golang.org/x/sync/errgroup"
 
 	"url-checker/internal/api"
 	"url-checker/internal/checker"
@@ -25,6 +27,8 @@ type Application struct {
 	router    *gin.Engine
 	server    *http.Server
 	startTime time.Time
+	mu        sync.RWMutex
+	isRunning bool
 }
 
 // NewApplication 应用构造函数
@@ -35,19 +39,24 @@ func NewApplication(cfg *config.Config, logger zerolog.Logger) (*Application, er
 		startTime: time.Now(),
 	}
 
-	// 后续初始化步骤
+	// 初始化检查器
 	if err := app.initChecker(); err != nil {
+		// 注意：initChecker 内部已经处理了日志记录
 		return nil, fmt.Errorf("初始化检查器失败: %w", err)
 	}
 
+	// 初始化处理器
 	if err := app.initHandler(); err != nil {
+		// 注意：initChecker 内部已经处理了日志记录
 		return nil, fmt.Errorf("初始化处理器失败: %w", err)
 	}
 
+	// 初始化路由
 	if err := app.initRouter(); err != nil {
 		return nil, fmt.Errorf("初始化路由失败: %w", err)
 	}
 
+	// 初始化服务器
 	if err := app.initServer(); err != nil {
 		return nil, fmt.Errorf("初始化服务器失败: %w", err)
 	}
@@ -88,13 +97,7 @@ func (app *Application) initChecker() error {
 
 // initHandler 初始化API处理器
 func (app *Application) initHandler() error {
-	handlerConfig := api.HandlerConfig{
-		ValidationMessages: map[string]string{
-			"required": "缺少必要参数 %s",
-			"url":      "URL格式无效: %v",
-		},
-		RequestTimeout: 60 * time.Second,
-	}
+	handlerConfig := api.DefaultHandlerConfig()
 
 	app.handler = api.NewHandler(app.checker, app.logger, handlerConfig)
 	app.logger.Info().Msg("API处理器初始化完成")
@@ -225,60 +228,134 @@ func GetRequestLogger(c *gin.Context) zerolog.Logger {
 	return zerolog.Nop()
 }
 
-// Run 启动应用
-func (app *Application) Run() error {
+// Run 启动应用（阻塞版本）
+func (app *Application) Run(ctx context.Context) error {
+	app.mu.Lock()
+	if app.isRunning {
+		app.mu.Unlock()
+		return fmt.Errorf("应用已经在运行")
+	}
+	app.isRunning = true
+	app.mu.Unlock()
+
 	app.logger.Info().
 		Str("phase", "startup").
 		Str("port", app.config.Server.Port).
 		Str("env", app.config.Server.Env).
-		Bool("ssl_enabled", app.config.SSL.Enabled).
 		Msg("URL检查器服务启动中")
 
-	// 在goroutine中启动服务器，以便后续可以优雅关闭
+	// 创建错误通道
+	serverErr := make(chan error, 1)
+
+	// 启动服务器
 	go func() {
 		app.logger.Info().Str("address", ":"+app.config.Server.Port).Msg("HTTP服务器开始监听")
 
 		if err := app.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			app.logger.Fatal().
+			app.logger.Error().
 				Err(err).
 				Str("phase", "startup").
 				Msg("HTTP服务器启动失败")
+			serverErr <- err
+		} else {
+			serverErr <- nil
 		}
 	}()
 
-	return nil
+	// 监听多个事件
+	select {
+	case <-ctx.Done():
+		app.logger.Info().Msg("收到关闭信号，开始优雅关闭")
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), app.config.Server.ShutdownTimeout)
+		defer cancel()
+
+		return app.Shutdown(shutdownCtx)
+
+	case err := <-serverErr:
+		if err != nil {
+			// 服务器启动失败，尝试清理资源
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			app.Shutdown(shutdownCtx) // 忽略错误，因为我们已经在错误状态
+			return err
+		}
+		return nil
+	}
 }
 
 // Shutdown 优雅关闭
 func (app *Application) Shutdown(ctx context.Context) error {
+	app.mu.Lock()
+	if !app.isRunning {
+		app.mu.Unlock()
+		return nil // 已经关闭
+	}
+	app.isRunning = false
+	app.mu.Unlock()
+
 	shutdownLogger := app.logger.With().Str("phase", "shutdown").Logger()
 	shutdownLogger.Info().Msg("开始应用关闭流程")
 
-	// 先关闭HTTP服务器，停止接收新请求
+	shutdownStart := time.Now()
+
+	// 使用 errgroup 管理关闭操作
+	g, shutdownCtx := errgroup.WithContext(ctx)
+
+	// 1. 关闭HTTP服务器
 	if app.server != nil {
-		shutdownLogger.Debug().Msg("正在关闭HTTP服务器...")
-		if err := app.server.Shutdown(ctx); err != nil {
-			shutdownLogger.Error().Err(err).Msg("HTTP服务器关闭失败")
-			return fmt.Errorf("服务器关闭失败: %w", err)
-		}
-		shutdownLogger.Info().Msg("HTTP服务器已关闭")
+		g.Go(func() error {
+			shutdownLogger.Debug().Msg("正在关闭HTTP服务器...")
+
+			serverShutdownCtx, cancel := context.WithTimeout(shutdownCtx, 30*time.Second)
+			defer cancel()
+
+			if err := app.server.Shutdown(serverShutdownCtx); err != nil {
+				shutdownLogger.Error().Err(err).Msg("HTTP服务器关闭失败")
+				return fmt.Errorf("HTTP服务器关闭失败: %w", err)
+			}
+
+			shutdownLogger.Info().Msg("HTTP服务器已关闭")
+			return nil
+		})
 	}
 
-	// 再关闭业务组件
+	// 2. 关闭检查器
 	if app.checker != nil {
-		shutdownLogger.Debug().Msg("正在关闭URL检查器...")
-		if err := app.checker.Shutdown(); err != nil {
-			shutdownLogger.Error().Err(err).Msg("URL检查器关闭失败")
-			return fmt.Errorf("检查器关闭失败: %w", err)
-		}
-		shutdownLogger.Info().Msg("URL检查器已关闭")
+		g.Go(func() error {
+			shutdownLogger.Debug().Msg("正在关闭URL检查器...")
+
+			checkerShutdownCtx, cancel := context.WithTimeout(shutdownCtx, 10*time.Second)
+			defer cancel()
+
+			if err := app.checker.Shutdown(checkerShutdownCtx); err != nil {
+				shutdownLogger.Error().Err(err).Msg("URL检查器关闭失败")
+				return fmt.Errorf("URL检查器关闭失败: %w", err)
+			}
+
+			shutdownLogger.Info().Msg("URL检查器已关闭")
+			return nil
+		})
 	}
+
+	// 等待所有关闭操作完成
+	err := g.Wait()
 
 	shutdownLogger.Info().
 		Dur("total_uptime", time.Since(app.startTime)).
+		Dur("shutdown_duration", time.Since(shutdownStart)).
+		Err(err).
 		Msg("应用关闭完成")
 
-	return nil
+	return err
+}
+
+// IsReady 检查应用是否就绪
+func (app *Application) IsReady() bool {
+	app.mu.RLock()
+	defer app.mu.RUnlock()
+
+	return app.isRunning && app.checker != nil
 }
 
 // GetRouter 获取路由（用于测试）

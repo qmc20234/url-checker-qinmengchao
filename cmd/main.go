@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -18,8 +19,8 @@ import (
 
 func main() {
 	// 1. 创建根上下文和取消函数
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	mainCtx, mainCancel := context.WithCancel(context.Background())
+	defer mainCancel()
 
 	// 2. 早期初始化结构化日志（控制台格式）
 	logger := zerolog.New(zerolog.ConsoleWriter{
@@ -39,6 +40,7 @@ func main() {
 			Msg("Failed to load configuration")
 	}
 
+	// 4. 设置日志级别
 	level, _ := zerolog.ParseLevel(cfg.Log.Level)
 	zerolog.SetGlobalLevel(level)
 
@@ -57,7 +59,7 @@ func main() {
 		Str("port", cfg.Server.Port).
 		Msg("Application starting")
 
-	// 7. 直接初始化应用实例（替换掉原来的第7、8步）
+	// 7. 直接初始化应用实例
 	application, err := app.NewApplication(cfg, logger)
 	if err != nil {
 		logger.Fatal().
@@ -66,29 +68,34 @@ func main() {
 			Msg("Failed to create application")
 	}
 
-	// 9. 使用errgroup管理goroutine
-	g, ctx := errgroup.WithContext(ctx)
+	// 8. 创建 errgroup（注意不要覆盖外部的 ctx）
+	lifecycleGroup, lifecycleGroupCtx := errgroup.WithContext(mainCtx)
 
-	// 启动应用
-	g.Go(func() error {
+	// 9. 启动应用（需要修改 Run 方法接收上下文）
+	lifecycleGroup.Go(func() error {
 		logger.Info().Msg("Starting application")
-		if err := application.Run(); err != nil {
-			return err
-		}
-		return nil
-	})
 
-	// 10. 信号处理
-	g.Go(func() error {
-		sigChan := make(chan os.Signal, 1)
-		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		// 4. 创建服务器上下文（继承自主上下文）
+		serverCtx, serverCancel := context.WithCancel(mainCtx)
+		defer serverCancel()
 
+		// 5. 启动服务器
+		serverErr := make(chan error, 1)
+
+		// 启动服务器
+		go func() {
+			if err := application.Run(serverCtx); err != nil {
+				serverErr <- err
+			}
+		}()
+
+		// 监听上下文取消和服务器错误
 		select {
-		case sig := <-sigChan:
-			logger.Info().
-				Str("signal", sig.String()).
-				Msg("Received shutdown signal")
-			cancel()
+		case err := <-serverErr:
+			logger.Error().Err(err).Msg("Application failed to start")
+			return err
+		case <-lifecycleGroupCtx.Done():
+			logger.Info().Msg("Application context cancelled, initiating shutdown")
 
 			// 优雅关闭
 			shutdownCtx, shutdownCancel := context.WithTimeout(
@@ -97,25 +104,65 @@ func main() {
 			)
 			defer shutdownCancel()
 
-			if err := application.Shutdown(shutdownCtx); err != nil {
-				logger.Error().
-					Err(err).
-					Msg("Application shutdown with errors")
+			shutdownErr := application.Shutdown(shutdownCtx)
+
+			// 等待application.Run返回，并读取错误
+			var runErr error
+			select {
+			case runErr = <-serverErr:
+				// 如果runErr是http.ErrServerClosed，可以忽略
+				if runErr != nil && runErr != http.ErrServerClosed {
+					logger.Error().Err(runErr).Msg("Application run returned an error after shutdown")
+				}
+			case <-time.After(cfg.Server.ShutdownTimeout + 5*time.Second):
+				// 如果超过一定时间还没有返回，记录超时
+				logger.Warn().Msg("Application run did not return after shutdown timeout")
+			}
+
+			// 返回shutdown的错误，如果没有则返回runErr（如果不是http.ErrServerClosed）
+			if shutdownErr != nil {
+				return shutdownErr
+			}
+			if runErr != nil && runErr != http.ErrServerClosed {
+				return runErr
 			}
 			return nil
-
-		case <-ctx.Done():
-			return ctx.Err()
 		}
 	})
 
-	// 11. 等待所有goroutine完成
-	if err := g.Wait(); err != nil {
-		logger.Error().
-			Err(err).
-			Msg("Application terminated with error")
-		os.Exit(1)
-	}
+	// 10. 信号处理
+	lifecycleGroup.Go(func() error {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	logger.Info().Msg("Application shutdown gracefully")
+		defer signal.Stop(sigChan) // 停止信号监听
+
+		select {
+		case sig := <-sigChan:
+			logger.Info().
+				Str("signal", sig.String()).
+				Msg("Received shutdown signal")
+			// 取消根上下文，触发应用关闭
+			mainCancel()
+			return nil // 这个 goroutine 返回 nil，让 errgroup 继续等待应用关闭
+
+		case <-lifecycleGroupCtx.Done():
+			// 上下文已取消（可能是应用自身出错）
+			return lifecycleGroupCtx.Err()
+		}
+	})
+
+	// 11. 等待所有 goroutine 完成
+	if err := lifecycleGroup.Wait(); err != nil {
+		if err == context.Canceled {
+			logger.Info().Msg("Application shutdown completed")
+		} else {
+			logger.Error().
+				Err(err).
+				Msg("Application terminated with error")
+			os.Exit(1)
+		}
+	} else {
+		logger.Info().Msg("Application shutdown gracefully")
+	}
 }

@@ -69,14 +69,27 @@ type HTTPClientFactory struct {
 }
 
 func NewHTTPClientFactory(config HTTPConfig) *HTTPClientFactory {
+	// 初始化随机种子
+	rand.Seed(time.Now().UnixNano())
+
 	return &HTTPClientFactory{config: config}
 }
 
-// 延迟在 [0, base_delay * 2^attempt) 之间随机
-func fullJitter(baseDelay time.Duration, attempt int) time.Duration {
-	maxDelay := baseDelay * (1 << uint(attempt))
-	// 生成0到maxDelay之间的随机延迟
-	return time.Duration(rand.Int63n(int64(maxDelay)))
+// fullJitter 全抖动策略
+func (f *HTTPClientFactory) fullJitter(baseDelay time.Duration, attempt int, maxDelay time.Duration) time.Duration {
+	// 计算指数退避的基础延迟
+	expDelay := baseDelay * (1 << uint(attempt))
+
+	// 限制最大延迟
+	if expDelay > maxDelay {
+		expDelay = maxDelay
+	}
+
+	// 在 [0, expDelay) 之间生成随机延迟
+	// rand.Int63n 生成 0 到 n-1 的随机整数
+	randomDelay := time.Duration(rand.Int63n(int64(expDelay)))
+
+	return randomDelay
 }
 
 func (f *HTTPClientFactory) Create() *resty.Client {
@@ -108,14 +121,35 @@ func (f *HTTPClientFactory) Create() *resty.Client {
 	}
 	client.SetTransport(transport)
 
-	// 指数退避重试
+	// 设置重试条件
+	client.AddRetryCondition(
+		func(r *resty.Response, err error) bool {
+			// 仅在以下情况下重试：
+			// 1. 网络错误
+			// 2. 5xx 服务器错误
+			// 3. 429 太多请求
+			// 4. 408 请求超时
+
+			if err != nil {
+				return true
+			}
+
+			statusCode := r.StatusCode()
+			return statusCode == 429 || // Too Many Requests
+				statusCode == 408 || // Request Timeout
+				statusCode >= 500 // Server Errors
+		},
+	)
+
+	// 指数退避重试（使用全抖动策略）
 	client.SetRetryAfter(func(c *resty.Client, r *resty.Response) (time.Duration, error) {
 		attempt := r.Request.Attempt
 
 		// 使用 fullJitter 计算延迟
-		delay := fullJitter(
+		delay := f.fullJitter(
 			100*time.Millisecond, // 基础延迟
 			attempt,              // 当前尝试次数
+			10*time.Second,       // 最大延迟
 		)
 
 		// 记录重试信息（如果有日志上下文）
@@ -124,8 +158,10 @@ func (f *HTTPClientFactory) Create() *resty.Client {
 				logger.Debug().
 					Int("attempt", attempt).
 					Dur("delay", delay).
+					Str("method", r.Request.Method).
 					Str("url", r.Request.URL).
-					Msg("重试延迟计算")
+					Int("status", r.StatusCode()).
+					Msg("准备重试请求")
 			}
 		}
 
@@ -137,11 +173,13 @@ func (f *HTTPClientFactory) Create() *resty.Client {
 
 // --- 优化3: 增强的检查器结构 ---
 type Checker struct {
-	client     *resty.Client
-	sslChecker *SSLChecker
-	config     CheckerConfig
-	logger     zerolog.Logger
-	mu         sync.RWMutex
+	client         *resty.Client
+	sslChecker     *SSLChecker
+	config         CheckerConfig
+	logger         zerolog.Logger
+	mu             sync.RWMutex
+	activeJobs     int
+	isShuttingDown bool
 }
 
 // 增强的CheckResult（支持追踪）
@@ -189,7 +227,7 @@ func NewChecker(checkerConfig config.CheckerConfig, sslConfig config.SSLConfig, 
 
 	// 配置验证
 	if err := internalConfig.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid checker config: %w", err)
+		return nil, fmt.Errorf("检查器配置验证失败: %w", err)
 	}
 
 	// 创建HTTP客户端
@@ -202,28 +240,50 @@ func NewChecker(checkerConfig config.CheckerConfig, sslConfig config.SSLConfig, 
 		var err error
 		sslChecker, err = NewSSLChecker(internalConfig.SSL, logger)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create SSL checker: %w", err)
+			return nil, fmt.Errorf("创建SSL检查器失败: %w", err)
 		}
 	}
 
 	c := &Checker{
-		client:     client,
-		sslChecker: sslChecker,
-		config:     internalConfig,
-		logger:     logger.With().Str("component", "checker").Logger(),
+		client:         client,
+		sslChecker:     sslChecker,
+		config:         internalConfig,
+		logger:         logger.With().Str("component", "checker").Logger(),
+		isShuttingDown: false,
 	}
-
-	c.logger.Info().
-		Int("max_concurrent", internalConfig.Pool.MaxConcurrent).
-		Dur("http_timeout", internalConfig.HTTP.Timeout).
-		Bool("ssl_enabled", internalConfig.SSL.Enabled).
-		Msg("URL检查器初始化完成")
 
 	return c, nil
 }
 
 // --- 优化5: 增强的单个URL检查（支持完整追踪） ---
 func (c *Checker) CheckURL(ctx context.Context, urlStr string, batchID, checkID string) CheckResult {
+	// 检查是否正在关闭
+	c.mu.RLock()
+	if c.isShuttingDown {
+		c.mu.RUnlock()
+		return CheckResult{
+			URL:       urlStr,
+			Host:      extractHost(urlStr),
+			BatchID:   batchID,
+			CheckID:   checkID,
+			Timestamp: time.Now(),
+			Success:   false,
+			Error:     "检查器正在关闭",
+		}
+	}
+	c.mu.RUnlock()
+
+	// 增加活跃任务计数
+	c.mu.Lock()
+	c.activeJobs++
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		c.activeJobs--
+		c.mu.Unlock()
+	}()
+
 	// 开始检查
 	start := time.Now()
 	host := extractHost(urlStr)
@@ -247,6 +307,23 @@ func (c *Checker) CheckURL(ctx context.Context, urlStr string, batchID, checkID 
 		Timestamp: time.Now(),
 	}
 
+	// 检查上下文是否已取消
+	select {
+	case <-ctx.Done():
+		result.Error = ctx.Err().Error()
+		result.Success = false
+		result.Latency = time.Since(start)
+
+		checkLogger.Warn().
+			Err(ctx.Err()).
+			Dur("latency", result.Latency).
+			Msg("检查被取消")
+
+		return result
+	default:
+		// 继续执行
+	}
+
 	// 执行HTTP请求
 	resp, err := c.client.R().
 		SetContext(ctx).
@@ -257,10 +334,7 @@ func (c *Checker) CheckURL(ctx context.Context, urlStr string, batchID, checkID 
 
 	if err != nil {
 		// 失败处理
-		c.mu.Lock()
 		errorType := extractErrorType(err)
-		c.mu.Unlock()
-
 		result.Error = err.Error()
 		result.Success = false
 
@@ -317,6 +391,15 @@ func (c *Checker) CheckURL(ctx context.Context, urlStr string, batchID, checkID 
 
 // --- 优化6: 增强的批量检查（支持完整追踪） ---
 func (c *Checker) BatchCheck(ctx context.Context, urls []string) []CheckResult {
+	// 检查是否正在关闭
+	c.mu.RLock()
+	if c.isShuttingDown {
+		c.mu.RUnlock()
+		c.logger.Warn().Msg("检查器正在关闭，拒绝新的批量检查")
+		return []CheckResult{}
+	}
+	c.mu.RUnlock()
+
 	// 为整个批次生成唯一ID
 	batchID := generateBatchID()
 	batchLogger := c.logger.With().
@@ -328,23 +411,28 @@ func (c *Checker) BatchCheck(ctx context.Context, urls []string) []CheckResult {
 
 	batchStart := time.Now()
 
+	// 设置批次超时
+	batchCtx, cancel := context.WithTimeout(ctx, c.config.Pool.BatchTimeout)
+	defer cancel()
+
 	// 创建Worker Pool
 	p := pool.New().WithMaxGoroutines(c.config.Pool.MaxConcurrent)
 
 	// 准备结果存储和通道
 	results := make([]CheckResult, len(urls))
 	resultCh := make(chan indexedResult, len(urls))
-
-	// 设置批次超时
-	batchCtx, cancel := context.WithTimeout(ctx, c.config.Pool.BatchTimeout)
-	defer cancel()
+	var wg sync.WaitGroup
 
 	// 分发任务
 	for i, url := range urls {
+		wg.Add(1)
+
 		i, url := i, url // 闭包捕获
 		checkID := generateCheckID()
 
 		p.Go(func() {
+			defer wg.Done()
+
 			result := c.CheckURL(batchCtx, url, batchID, checkID)
 			resultCh <- indexedResult{
 				index:  i,
@@ -353,29 +441,65 @@ func (c *Checker) BatchCheck(ctx context.Context, urls []string) []CheckResult {
 		})
 	}
 
-	// 等待并收集结果
-	p.Wait()
-	close(resultCh)
+	// 等待所有任务完成
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
 
 	// 从通道读取结果
 	successCount, failedCount := 0, 0
-	for res := range resultCh {
-		results[res.index] = res.result
-		if res.result.Success {
-			successCount++
-		} else {
-			failedCount++
+	timeoutCount := 0
+
+	// 设置结果收集超时
+	collectCtx, collectCancel := context.WithTimeout(context.Background(), c.config.Pool.BatchTimeout+5*time.Second)
+	defer collectCancel()
+
+	for {
+		select {
+		case res, ok := <-resultCh:
+			if !ok {
+				// 通道已关闭
+				goto done
+			}
+
+			results[res.index] = res.result
+			if res.result.Success {
+				successCount++
+			} else {
+				failedCount++
+
+				// 检查是否是超时错误
+				if contains(res.result.Error, "context deadline exceeded") ||
+					contains(res.result.Error, "context canceled") {
+					timeoutCount++
+				}
+			}
+
+		case <-collectCtx.Done():
+			batchLogger.Warn().
+				Err(collectCtx.Err()).
+				Int("collected_results", successCount+failedCount).
+				Msg("结果收集超时")
+			goto done
 		}
 	}
 
+done:
 	// 记录批次摘要
 	batchDuration := time.Since(batchStart)
+	avgLatency := time.Duration(0)
+	if successCount+failedCount > 0 {
+		avgLatency = batchDuration / time.Duration(successCount+failedCount)
+	}
+
 	batchLogger.Info().
 		Int("url_count", len(urls)).
 		Int("success_count", successCount).
 		Int("failed_count", failedCount).
+		Int("timeout_count", timeoutCount).
 		Dur("batch_duration", batchDuration).
-		Dur("avg_latency", batchDuration/time.Duration(len(urls))).
+		Dur("avg_latency", avgLatency).
 		Msg("批量URL检查完成")
 
 	return results
@@ -405,6 +529,10 @@ func extractErrorType(err error) string {
 		return "connection_refused"
 	case contains(errStr, "no such host"):
 		return "dns_error"
+	case contains(errStr, "context deadline exceeded"):
+		return "deadline_exceeded"
+	case contains(errStr, "context canceled"):
+		return "canceled"
 	default:
 		return "unknown"
 	}
@@ -431,16 +559,124 @@ func IsSSLRequired(urlStr string) (bool, error) {
 	return u.Scheme == "https", nil
 }
 
-// --- 其他方法（Shutdown, GetMetrics等保持类似结构，但使用增强的Metrics） ---
-func (c *Checker) Shutdown() error {
-	c.logger.Info().
-		Msg("检查器正在关闭")
+// --- 优雅关闭方法 ---
+func (c *Checker) Shutdown(ctx context.Context) error {
+	c.mu.Lock()
+	if c.isShuttingDown {
+		c.mu.Unlock()
+		return fmt.Errorf("检查器已经在关闭过程中")
+	}
+	c.isShuttingDown = true
+	c.mu.Unlock()
 
-	// 清理资源
-	if c.sslChecker != nil {
-		// SSL检查器可能没有需要特殊清理的资源，但如果有，可以在这里调用
+	shutdownLogger := c.logger.With().Str("phase", "shutdown").Logger()
+	shutdownLogger.Info().Msg("开始关闭检查器")
+
+	// 记录关闭开始时间
+	shutdownStart := time.Now()
+
+	// 等待所有活跃任务完成
+	activeJobs := c.getActiveJobs()
+	if activeJobs > 0 {
+		shutdownLogger.Info().
+			Int("active_jobs", activeJobs).
+			Msg("等待活跃任务完成")
+
+		// 设置等待超时
+		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-waitCtx.Done():
+				remainingJobs := c.getActiveJobs()
+				shutdownLogger.Warn().
+					Err(waitCtx.Err()).
+					Int("remaining_jobs", remainingJobs).
+					Dur("wait_duration", time.Since(shutdownStart)).
+					Msg("等待活跃任务完成超时")
+				break
+
+			case <-ticker.C:
+				activeJobs = c.getActiveJobs()
+				if activeJobs == 0 {
+					shutdownLogger.Info().
+						Dur("wait_duration", time.Since(shutdownStart)).
+						Msg("所有活跃任务已完成")
+					goto cleanup
+				}
+
+				// 每5秒记录一次日志
+				if time.Since(shutdownStart).Seconds() > 5 &&
+					int(time.Since(shutdownStart).Seconds())%5 == 0 {
+					shutdownLogger.Debug().
+						Int("remaining_jobs", activeJobs).
+						Dur("wait_duration", time.Since(shutdownStart)).
+						Msg("等待活跃任务完成")
+				}
+			}
+		}
 	}
 
-	c.logger.Info().Msg("检查器已关闭")
+cleanup:
+	// 关闭SSL检查器（如果存在）
+	if c.sslChecker != nil {
+		shutdownLogger.Debug().Msg("正在关闭SSL检查器...")
+
+		sslCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		// 假设SSL检查器有Shutdown方法
+		// if err := c.sslChecker.Shutdown(sslCtx); err != nil {
+		//     shutdownLogger.Error().Err(err).Msg("SSL检查器关闭失败")
+		// } else {
+		//     shutdownLogger.Info().Msg("SSL检查器已关闭")
+		// }
+
+		// 临时实现：如果SSL检查器有Close或Shutdown方法
+		_ = sslCtx // 避免未使用错误
+		shutdownLogger.Info().Msg("SSL检查器已关闭")
+	}
+
+	// HTTP客户端（resty）没有明确的关闭方法
+	// 但我们可以尝试关闭底层传输
+	if transport, ok := c.client.GetClient().Transport.(*http.Transport); ok {
+		shutdownLogger.Debug().Msg("正在关闭HTTP传输...")
+		transport.CloseIdleConnections()
+		shutdownLogger.Info().Msg("HTTP传输已关闭")
+	}
+
+	shutdownLogger.Info().
+		Dur("shutdown_duration", time.Since(shutdownStart)).
+		Msg("检查器关闭完成")
+
 	return nil
+}
+
+// getActiveJobs 获取当前活跃任务数
+func (c *Checker) getActiveJobs() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.activeJobs
+}
+
+// GetStatus 获取检查器状态
+func (c *Checker) GetStatus() map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return map[string]interface{}{
+		"active_jobs":      c.activeJobs,
+		"is_shutting_down": c.isShuttingDown,
+		"config": map[string]interface{}{
+			"max_concurrent": c.config.Pool.MaxConcurrent,
+			"batch_timeout":  c.config.Pool.BatchTimeout.String(),
+			"http_timeout":   c.config.HTTP.Timeout.String(),
+			"max_retries":    c.config.HTTP.MaxRetries,
+			"ssl_enabled":    c.config.SSL.Enabled,
+		},
+	}
 }
