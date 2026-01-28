@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -106,26 +105,11 @@ func main() {
 
 			shutdownErr := application.Shutdown(shutdownCtx)
 
-			// 等待application.Run返回，并读取错误
-			var runErr error
-			select {
-			case runErr = <-serverErr:
-				// 如果runErr是http.ErrServerClosed，可以忽略
-				if runErr != nil && runErr != http.ErrServerClosed {
-					logger.Error().Err(runErr).Msg("Application run returned an error after shutdown")
-				}
-			case <-time.After(cfg.Server.ShutdownTimeout + 5*time.Second):
-				// 如果超过一定时间还没有返回，记录超时
-				logger.Warn().Msg("Application run did not return after shutdown timeout")
-			}
-
 			// 返回shutdown的错误，如果没有则返回runErr（如果不是http.ErrServerClosed）
 			if shutdownErr != nil {
 				return shutdownErr
 			}
-			if runErr != nil && runErr != http.ErrServerClosed {
-				return runErr
-			}
+
 			return nil
 		}
 	})
