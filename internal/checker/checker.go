@@ -57,9 +57,6 @@ func (c *CheckerConfig) Validate() error {
 	if c.HTTP.Timeout <= 0 {
 		return fmt.Errorf("HTTP.Timeout must be > 0")
 	}
-	if c.SSL.Enabled && c.SSL.Timeout <= 0 {
-		return fmt.Errorf("SSL.Timeout must be > 0 when SSL enabled")
-	}
 	return nil
 }
 
@@ -219,7 +216,6 @@ func NewChecker(checkerConfig config.CheckerConfig, sslConfig config.SSLConfig, 
 			BatchTimeout:  checkerConfig.BatchTimeout,
 		},
 		SSL: SSLConfig{
-			Enabled:            sslConfig.Enabled,
 			InsecureSkipVerify: sslConfig.InsecureSkipVerify,
 			Timeout:            sslConfig.Timeout,
 		},
@@ -236,12 +232,10 @@ func NewChecker(checkerConfig config.CheckerConfig, sslConfig config.SSLConfig, 
 
 	// 创建SSL检查器（如果启用）
 	var sslChecker *SSLChecker
-	if internalConfig.SSL.Enabled {
-		var err error
-		sslChecker, err = NewSSLChecker(internalConfig.SSL, logger)
-		if err != nil {
-			return nil, fmt.Errorf("创建SSL检查器失败: %w", err)
-		}
+	var err error
+	sslChecker, err = NewSSLChecker(internalConfig.SSL, logger)
+	if err != nil {
+		return nil, fmt.Errorf("创建SSL检查器失败: %w", err)
 	}
 
 	c := &Checker{
@@ -351,12 +345,10 @@ func (c *Checker) CheckURL(ctx context.Context, urlStr string, batchID, checkID 
 	// 成功处理
 	result.StatusCode = resp.StatusCode()
 	result.Success = resp.IsSuccess()
-	result.RetryCount = resp.Request.Attempt
 
 	checkLogger.Debug().
 		Int("status_code", result.StatusCode).
 		Dur("latency", result.Latency).
-		Int("retry_count", result.RetryCount).
 		Msg("URL检查完成")
 
 	// SSL检查
@@ -676,7 +668,6 @@ func (c *Checker) GetStatus() map[string]interface{} {
 			"batch_timeout":  c.config.Pool.BatchTimeout.String(),
 			"http_timeout":   c.config.HTTP.Timeout.String(),
 			"max_retries":    c.config.HTTP.MaxRetries,
-			"ssl_enabled":    c.config.SSL.Enabled,
 		},
 	}
 }

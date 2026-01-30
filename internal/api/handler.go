@@ -34,7 +34,6 @@ func DefaultHandlerConfig() HandlerConfig {
 			"required": "参数 %s 为必填项",
 			"url":      "参数 %s 包含无效的URL格式: %v",
 			"min":      "参数 %s 至少需要 %v 个元素",
-			"max":      "参数 %s 最多允许 %v 个元素",
 			"dive":     "参数 %s 中的元素验证失败",
 		},
 		SSEHeaders: map[string]string{

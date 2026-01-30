@@ -22,7 +22,6 @@ type ServerConfig struct {
 	IdleTimeout     time.Duration `mapstructure:"idle_timeout"`
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout"`
 	Env             string        `mapstructure:"env"`
-	MaxBodySize     int64         `mapstructure:"max_body_size"`
 }
 
 type LogConfig struct {
@@ -52,7 +51,6 @@ type CheckerConfig struct {
 
 // SSLConfig - 统一的 SSL 配置
 type SSLConfig struct {
-	Enabled            bool          `mapstructure:"enabled"`
 	InsecureSkipVerify bool          `mapstructure:"insecure_skip_verify"`
 	Timeout            time.Duration `mapstructure:"timeout"`
 }
@@ -79,8 +77,8 @@ func (c *Config) Validate() error {
 	}
 
 	// 验证 SSL 配置
-	if c.SSL.Enabled && c.SSL.Timeout <= 0 {
-		return fmt.Errorf("ssl.timeout 必须大于0当SSL启用时")
+	if c.SSL.Timeout <= 0 {
+		return fmt.Errorf("ssl.timeout 必须大于0")
 	}
 
 	// 验证环境
@@ -249,11 +247,6 @@ func postProcessConfig(cfg *Config) {
 		// 开发环境可以放宽限制
 		cfg.Checker.AllowInsecure = true
 		cfg.SSL.InsecureSkipVerify = true
-	}
-
-	// 如果SSL禁用，确保相关配置也相应调整
-	if !cfg.SSL.Enabled {
-		cfg.SSL.InsecureSkipVerify = true // 禁用时不验证
 	}
 }
 

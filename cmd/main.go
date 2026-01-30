@@ -68,10 +68,10 @@ func main() {
 	}
 
 	// 8. 创建 errgroup（注意不要覆盖外部的 ctx）
-	lifecycleGroup, lifecycleGroupCtx := errgroup.WithContext(mainCtx)
+	g, ctx := errgroup.WithContext(mainCtx)
 
 	// 9. 启动应用（需要修改 Run 方法接收上下文）
-	lifecycleGroup.Go(func() error {
+	g.Go(func() error {
 		logger.Info().Msg("Starting application")
 
 		// 4. 创建服务器上下文（继承自主上下文）
@@ -93,7 +93,7 @@ func main() {
 		case err := <-serverErr:
 			logger.Error().Err(err).Msg("Application failed to start")
 			return err
-		case <-lifecycleGroupCtx.Done():
+		case <-ctx.Done():
 			logger.Info().Msg("Application context cancelled, initiating shutdown")
 
 			// 优雅关闭
@@ -115,7 +115,7 @@ func main() {
 	})
 
 	// 10. 信号处理
-	lifecycleGroup.Go(func() error {
+	g.Go(func() error {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
@@ -130,14 +130,14 @@ func main() {
 			mainCancel()
 			return nil // 这个 goroutine 返回 nil，让 errgroup 继续等待应用关闭
 
-		case <-lifecycleGroupCtx.Done():
+		case <-ctx.Done():
 			// 上下文已取消（可能是应用自身出错）
-			return lifecycleGroupCtx.Err()
+			return ctx.Err()
 		}
 	})
 
 	// 11. 等待所有 goroutine 完成
-	if err := lifecycleGroup.Wait(); err != nil {
+	if err := g.Wait(); err != nil {
 		if err == context.Canceled {
 			logger.Info().Msg("Application shutdown completed")
 		} else {

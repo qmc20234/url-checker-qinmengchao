@@ -80,7 +80,6 @@ func (app *Application) initChecker() error {
 			Int("max_concurrent", app.config.Checker.MaxConcurrent).
 			Dur("timeout", app.config.Checker.Timeout).
 			Bool("allow_insecure", app.config.Checker.AllowInsecure).
-			Bool("ssl_enabled", app.config.SSL.Enabled).
 			Msg("检查器创建失败")
 		return fmt.Errorf("创建检查器失败: %w", err)
 	}
@@ -89,7 +88,6 @@ func (app *Application) initChecker() error {
 		Str("phase", "initialization").
 		Int("max_concurrent", app.config.Checker.MaxConcurrent).
 		Dur("timeout", app.config.Checker.Timeout).
-		Bool("ssl_enabled", app.config.SSL.Enabled).
 		Msg("URL检查器初始化完成")
 
 	return nil
@@ -153,7 +151,6 @@ func (app *Application) initServer() error {
 		Dur("read_timeout", app.config.Server.ReadTimeout).
 		Dur("write_timeout", app.config.Server.WriteTimeout).
 		Dur("idle_timeout", app.config.Server.IdleTimeout).
-		Int64("max_body_size", app.config.Server.MaxBodySize).
 		Msg("HTTP服务器配置完成")
 
 	return nil
