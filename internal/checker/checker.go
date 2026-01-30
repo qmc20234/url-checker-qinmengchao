@@ -621,13 +621,6 @@ cleanup:
 		sslCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 
-		// 假设SSL检查器有Shutdown方法
-		// if err := c.sslChecker.Shutdown(sslCtx); err != nil {
-		//     shutdownLogger.Error().Err(err).Msg("SSL检查器关闭失败")
-		// } else {
-		//     shutdownLogger.Info().Msg("SSL检查器已关闭")
-		// }
-
 		// 临时实现：如果SSL检查器有Close或Shutdown方法
 		_ = sslCtx // 避免未使用错误
 		shutdownLogger.Info().Msg("SSL检查器已关闭")
@@ -653,21 +646,4 @@ func (c *Checker) getActiveJobs() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.activeJobs
-}
-
-// GetStatus 获取检查器状态
-func (c *Checker) GetStatus() map[string]interface{} {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return map[string]interface{}{
-		"active_jobs":      c.activeJobs,
-		"is_shutting_down": c.isShuttingDown,
-		"config": map[string]interface{}{
-			"max_concurrent": c.config.Pool.MaxConcurrent,
-			"batch_timeout":  c.config.Pool.BatchTimeout.String(),
-			"http_timeout":   c.config.HTTP.Timeout.String(),
-			"max_retries":    c.config.HTTP.MaxRetries,
-		},
-	}
 }

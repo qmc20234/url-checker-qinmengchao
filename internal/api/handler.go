@@ -15,7 +15,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// --- 优化1: 配置结构定义 ---
 type HandlerConfig struct {
 	// 验证错误消息配置
 	ValidationMessages map[string]string
@@ -457,27 +456,4 @@ func (h *Handler) Shutdown(ctx context.Context) error {
 				Msg("等待活跃请求完成")
 		}
 	}
-}
-
-// GetMetrics 获取处理器指标
-func (h *Handler) GetMetrics() gin.H {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-
-	return gin.H{
-		"active_requests": h.activeRequests,
-		"max_concurrent":  h.config.MaxConcurrentRequests,
-		"request_timeout": h.config.RequestTimeout.String(),
-	}
-}
-
-// 如果需要，可以添加配置验证方法
-func (cfg *HandlerConfig) Validate() error {
-	if cfg.RequestTimeout <= 0 {
-		return fmt.Errorf("RequestTimeout必须大于0")
-	}
-	if cfg.MaxConcurrentRequests <= 0 {
-		return fmt.Errorf("MaxConcurrentRequests必须大于0")
-	}
-	return nil
 }

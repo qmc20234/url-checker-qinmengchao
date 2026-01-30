@@ -317,6 +317,24 @@ func (app *Application) Shutdown(ctx context.Context) error {
 		})
 	}
 
+	// 2. 在主关闭流程中添加handler关闭
+	if app.handler != nil {
+		g.Go(func() error {
+			shutdownLogger.Debug().Msg("正在关闭Handler资源...")
+
+			handlerShutdownCtx, cancel := context.WithTimeout(shutdownCtx, 15*time.Second)
+			defer cancel()
+
+			if err := app.handler.Shutdown(handlerShutdownCtx); err != nil {
+				shutdownLogger.Error().Err(err).Msg("Handler资源关闭失败")
+				return fmt.Errorf("Handler资源关闭失败: %w", err)
+			}
+
+			shutdownLogger.Info().Msg("Handler资源已关闭")
+			return nil
+		})
+	}
+
 	// 2. 关闭检查器
 	if app.checker != nil {
 		g.Go(func() error {
